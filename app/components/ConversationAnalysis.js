@@ -52,7 +52,8 @@ export default function ConversationAnalysis() {
       });
 
       if (!response.ok) {
-        throw new Error("Failed to process audio");
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to process audio");
       }
 
       const data = await response.json();
@@ -60,7 +61,7 @@ export default function ConversationAnalysis() {
       toast.success("Audio processed successfully!");
     } catch (error) {
       console.error("Error processing audio:", error);
-      toast.error("Failed to process audio. Please try again.");
+      toast.error(error.message || "Failed to process audio. Please try again.");
     } finally {
       setIsProcessing(false);
     }

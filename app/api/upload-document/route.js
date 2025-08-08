@@ -3,15 +3,22 @@ import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { requireAuth } from "../../lib/auth";
 import { PrismaClient } from "@prisma/client";
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { existsSync } from "fs";
-import pdf from "pdf-parse";
-import mammoth from "mammoth";
+
+// Only import these at runtime, not during build
+let pdf, mammoth;
+if (typeof window === 'undefined') {
+  try {
+    pdf = require("pdf-parse");
+    mammoth = require("mammoth");
+  } catch (e) {
+    console.log("PDF parsing libraries not available during build");
+  }
+}
 
 const prisma = new PrismaClient();
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 
 export async function POST(request) {
   try {
@@ -101,96 +108,136 @@ export async function POST(request) {
         metadata.truncated = true;
       }
 
-      // Generate summary using OpenAI
-      let summaryText;
-      try {
-        const summaryResponse = await openai.chat.completions.create({
-          model: "gpt-3.5-turbo",
-          messages: [
-                         {
-               role: "system",
-               content: "You are a helpful assistant that summarizes documents. You must respond with ONLY valid JSON. No other text, no markdown formatting, no explanations. The JSON must have this exact structure: {\"summary\": \"detailed summary text here\", \"keyPoints\": [\"key point 1\", \"key point 2\", \"key point 3\"], \"topics\": [\"topic 1\", \"topic 2\"]}. Ensure the JSON is properly formatted with double quotes around all keys and string values."
-             },
-            {
-              role: "user",
-              content: `Please analyze and summarize this document:\n\n${text}`
-            }
-          ],
-          max_tokens: 1000,
-          temperature: 0.3,
-        });
-        
-        summaryText = summaryResponse.choices[0].message.content;
-        console.log("OpenAI response:", summaryText);
-      } catch (openaiError) {
-        console.error("OpenAI API Error:", openaiError.message);
-        
-        // If quota exceeded, provide a basic summary
-        if (openaiError.message.includes("quota") || openaiError.message.includes("429")) {
-          const wordCount = text.split(/\s+/).length;
-          summaryText = JSON.stringify({
-            summary: `This document contains ${wordCount} words. Due to API quota limits, a detailed summary is not available. Please check your OpenAI billing to continue using this feature.`,
-            keyPoints: ["Document processed successfully", "API quota exceeded"],
-            topics: ["Document Analysis", "API Limits"]
-          });
-        } else {
-          throw openaiError;
-        }
-            }
-      
-      // Check if the response is empty or invalid
-      if (!summaryText || summaryText.trim() === "") {
-        throw new Error("OpenAI returned an empty response");
-      }
-      
-             // Parse the JSON response
-       let analysis;
-       console.log("Attempting to parse OpenAI response:", summaryText);
-       
+             // Generate summary using Gemini
+       let summaryText;
        try {
-         // First, try to parse the entire response as JSON
-         analysis = JSON.parse(summaryText);
-         console.log("Successfully parsed JSON:", analysis);
-       } catch (parseError) {
-         console.log("Initial JSON parse failed:", parseError.message);
+         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+         
+                                       const prompt = `You are a helpful assistant that summarizes documents. You must respond with ONLY valid JSON. No other text, no markdown formatting, no explanations, no code blocks, no prefixes, no suffixes.
+
+The JSON must have this exact structure:
+{
+  "summary": "detailed summary text here",
+  "keyPoints": ["key point 1", "key point 2", "key point 3"],
+  "topics": ["topic 1", "topic 2"]
+}
+
+CRITICAL: Start your response with { and end with }. Do not include any text before the opening brace or after the closing brace. Ensure all strings use double quotes.
+
+Please analyze and summarize this document:
+
+${text}`;
+
+         const result = await model.generateContent(prompt);
+         const response = await result.response;
+         summaryText = response.text();
+         
+         // Safety check for empty or undefined response
+         if (!summaryText || summaryText.trim() === "") {
+           throw new Error("Gemini returned an empty response");
+         }
+         
+         console.log("Gemini response:", summaryText);
+       } catch (geminiError) {
+         console.error("Gemini API Error:", geminiError.message);
+         
+         // If quota exceeded or other error, provide a basic summary
+         if (geminiError.message.includes("quota") || geminiError.message.includes("429") || geminiError.message.includes("rate")) {
+           const wordCount = text.split(/\s+/).length;
+           summaryText = JSON.stringify({
+             summary: `This document contains ${wordCount} words. Due to API quota limits, a detailed summary is not available. Please check your Google AI Studio billing to continue using this feature.`,
+             keyPoints: ["Document processed successfully", "API quota exceeded"],
+             topics: ["Document Analysis", "API Limits"]
+           });
+         } else {
+           throw geminiError;
+         }
+       }
+      
+             // Check if the response is empty or invalid
+       if (!summaryText || summaryText.trim() === "") {
+         throw new Error("Gemini returned an empty response");
+       }
+      
+                                                       // Parse the JSON response
+          let analysis;
+          console.log("Raw Gemini response:", summaryText);
+          console.log("Response length:", summaryText.length);
+          console.log("Response type:", typeof summaryText);
+         
+         // Clean the response - remove any leading/trailing whitespace and common prefixes
+         let cleanedResponse = summaryText.trim();
+         
+         // Remove common prefixes that might be added by AI models
+         const prefixes = [
+           "Here's the JSON response:",
+           "The JSON response is:",
+           "```json",
+           "```",
+           "JSON:",
+           "Response:"
+         ];
+         
+         for (const prefix of prefixes) {
+           if (cleanedResponse.startsWith(prefix)) {
+             cleanedResponse = cleanedResponse.substring(prefix.length).trim();
+           }
+         }
+         
+         // Remove trailing code blocks
+         if (cleanedResponse.endsWith("```")) {
+           cleanedResponse = cleanedResponse.substring(0, cleanedResponse.length - 3).trim();
+         }
+         
+         console.log("Cleaned response:", cleanedResponse);
+         
          try {
-           // If that fails, try to extract JSON from the response (in case it's wrapped in markdown)
-           const jsonMatch = summaryText.match(/\{[\s\S]*\}/);
-           if (jsonMatch) {
-             console.log("Found JSON match:", jsonMatch[0]);
-             analysis = JSON.parse(jsonMatch[0]);
-           } else {
-             console.log("No JSON pattern found, using fallback");
-             // Fallback: treat the entire response as summary
+           // First, try to parse the cleaned response as JSON
+           analysis = JSON.parse(cleanedResponse);
+           console.log("Successfully parsed JSON:", analysis);
+         } catch (parseError) {
+           console.log("Initial JSON parse failed:", parseError.message);
+           
+           try {
+             // If that fails, try to extract JSON from the response using a more robust regex
+             const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
+             if (jsonMatch) {
+               console.log("Found JSON match:", jsonMatch[0]);
+               analysis = JSON.parse(jsonMatch[0]);
+             } else {
+               console.log("No JSON pattern found, using fallback");
+               // Fallback: treat the entire response as summary
+               analysis = {
+                 summary: cleanedResponse,
+                 keyPoints: [],
+                 topics: []
+               };
+             }
+           } catch (secondParseError) {
+             console.log("Second JSON parse failed:", secondParseError.message);
+             // Final fallback if JSON parsing fails
+             console.log("Using final fallback for response:", cleanedResponse);
              analysis = {
-               summary: summaryText,
+               summary: cleanedResponse,
                keyPoints: [],
                topics: []
              };
            }
-         } catch (secondParseError) {
-           console.log("Second JSON parse failed:", secondParseError.message);
-           // Final fallback if JSON parsing fails
-           console.log("Using final fallback for response:", summaryText);
-           analysis = {
-             summary: summaryText,
-             keyPoints: [],
-             topics: []
-           };
          }
-       }
 
-      const result = {
-        summary: analysis.summary || summaryText,
-        keyPoints: analysis.keyPoints || [],
-        topics: analysis.topics || [],
-        metadata: {
-          ...metadata,
-          fileSize: documentFile.size,
-          fileType: documentFile.type,
-          originalWordCount: text.split(/\s+/).length,
-        }
-      };
+             // Ensure we have valid data even if parsing failed
+       const result = {
+         summary: analysis?.summary || cleanedResponse || summaryText || "Document processed successfully",
+         keyPoints: analysis?.keyPoints || [],
+         topics: analysis?.topics || [],
+         metadata: {
+           ...metadata,
+           fileSize: documentFile.size,
+           fileType: documentFile.type,
+           originalWordCount: text.split(/\s+/).length,
+           parsingSuccess: !!analysis?.summary,
+         }
+       };
 
       // Update task with results
       await prisma.task.update({
