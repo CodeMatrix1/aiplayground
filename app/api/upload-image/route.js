@@ -3,13 +3,11 @@ import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { requireAuth } from "../../lib/auth";
 import { PrismaClient } from "@prisma/client";
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { existsSync } from "fs";
 
 const prisma = new PrismaClient();
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 
 export async function POST(request) {
   try {
@@ -61,30 +59,21 @@ export async function POST(request) {
         data: { input: filePath },
       });
 
-      // Analyze image with OpenAI Vision
-      const analysisResponse = await openai.chat.completions.create({
-        model: "gpt-4-vision-preview",
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Please analyze this image and provide: 1. A detailed description, 2. List of objects detected, 3. Dominant colors, 4. Relevant tags. Format the response as JSON with keys: description, objects, colors, tags."
-              },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:${imageFile.type};base64,${buffer.toString('base64')}`
-                }
-              }
-            ]
-          }
-        ],
-        max_tokens: 1000,
-      });
+      // Analyze image with Gemini Vision
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      
+      const prompt = "Please analyze this image and provide: 1. A detailed description, 2. List of objects detected, 3. Dominant colors, 4. Relevant tags. Format the response as JSON with keys: description, objects, colors, tags.";
+      
+      const imagePart = {
+        inlineData: {
+          data: buffer.toString('base64'),
+          mimeType: imageFile.type
+        }
+      };
 
-      const analysisText = analysisResponse.choices[0].message.content;
+      const geminiResult = await model.generateContent([prompt, imagePart]);
+      const response = await geminiResult.response;
+      const analysisText = response.text();
       
       // Parse the JSON response
       let analysis;

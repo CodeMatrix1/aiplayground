@@ -1,14 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireAuth } from "../../lib/auth";
 import { PrismaClient } from "@prisma/client";
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import axios from "axios";
 import * as cheerio from "cheerio";
 
 const prisma = new PrismaClient();
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 
 export async function POST(request) {
   try {
@@ -49,15 +47,15 @@ export async function POST(request) {
     });
 
     try {
-      // Fetch web content
-      const response = await axios.get(url, {
-        timeout: 10000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-      });
+             // Fetch web content
+       const httpResponse = await axios.get(url, {
+         timeout: 10000,
+         headers: {
+           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+         }
+       });
 
-      const html = response.data;
+       const html = httpResponse.data;
       const $ = cheerio.load(html);
 
       // Extract text content
@@ -86,23 +84,20 @@ export async function POST(request) {
         readingTime: Math.ceil(text.split(/\s+/).length / 200), // Rough estimate: 200 words per minute
       };
 
-      // Generate summary using OpenAI
-      const summaryResponse = await openai.chat.completions.create({
-        model: "gpt-4",
-        messages: [
-          {
-            role: "system",
-            content: "You are a helpful assistant that summarizes web content. Provide a comprehensive summary, key points, and main topics. Format the response as JSON with keys: summary, keyPoints, topics."
-          },
-          {
-            role: "user",
-            content: `Please analyze and summarize this web content:\n\nTitle: ${title}\n\nContent: ${text}`
-          }
-        ],
-        max_tokens: 1000,
-      });
+      // Generate summary using Gemini
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      
+      const prompt = `You are a helpful assistant that summarizes web content. Provide a comprehensive summary, key points, and main topics. Format the response as JSON with keys: summary, keyPoints, topics.
 
-      const summaryText = summaryResponse.choices[0].message.content;
+Please analyze and summarize this web content:
+
+Title: ${title}
+
+Content: ${text}`;
+
+      const geminiResult = await model.generateContent(prompt);
+      const response = await geminiResult.response;
+      const summaryText = response.text();
       
       // Parse the JSON response
       let analysis;
