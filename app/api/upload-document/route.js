@@ -5,8 +5,17 @@ import { requireAuth } from "../../lib/auth";
 import { PrismaClient } from "@prisma/client";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { existsSync } from "fs";
-import pdf from "pdf-parse";
-import mammoth from "mammoth";
+
+// Only import these at runtime, not during build
+let pdf, mammoth;
+if (typeof window === 'undefined') {
+  try {
+    pdf = require("pdf-parse");
+    mammoth = require("mammoth");
+  } catch (e) {
+    console.log("PDF parsing libraries not available during build");
+  }
+}
 
 const prisma = new PrismaClient();
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
